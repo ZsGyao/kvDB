@@ -10,7 +10,8 @@ include (src/server/comm/cmake/utils.cmake)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -rdynamic -fPIC")
 
 # 指定编译选项
-set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -std=c++11 -O0 -ggdb -Wall -Werror")
+#set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -std=c++11 -O0 -ggdb -Wall -Werror")
+#set(CMAKE_CXX_FLAGS "$ENV{CXXFLAGS} -std=c++11 -O0 -ggdb -Wall")
 
 # -Wno-unused-function: 不要警告未使用函数
 # -Wno-builtin-macro-redefined: 不要警告内置宏重定义，用于重定义内置的__FILE__宏
@@ -30,7 +31,7 @@ set(LIB_SRC
         src/server/net/Buffer.cpp
         src/server/net/InetAddress.cpp
         src/server/net/Socket.cpp
-        src/server/net/EventLoop.cpp src/server/net/EventLoop.h src/server/net/Channel.cpp src/server/net/Channel.h)
+        src/server/net/EventLoop.cpp src/server/net/EventLoop.h src/server/net/Channel.cpp src/server/net/Channel.h src/server/net/EpollPoller.cpp src/server/net/EpollPoller.h)
 
 set(LIBS
         src

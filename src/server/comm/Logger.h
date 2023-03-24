@@ -23,10 +23,10 @@ namespace kvDB {
     do                                                                  \
     {                                                                   \
        Logger::ptr logger = kvDB::Singleton_Logger::GetInstance();      \
-       logger->setLogLevel(INFO);                                        \
+       logger->setLogLevel(INFO);                                       \
        char buf[1024] = {0};                                            \
        snprintf(buf,1024,logmsg, ##__VA_ARGS__);                        \
-       logger->log(buf);                                                 \
+       logger->log(buf);                                                \
     }while(0)
 
 #ifdef MUDEBUG
