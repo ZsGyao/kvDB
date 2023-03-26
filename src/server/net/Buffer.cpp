@@ -27,13 +27,14 @@ namespace kvDB {
     }
 
     /* 使用vector::swap和std::swap，这样就不需要涉及数据拷贝 */
-    void Buffer::swap(Buffer &rhs) {
+    void Buffer::swap(Buffer& rhs) {
         buffer_.swap(rhs.buffer_);
         std::swap(readerIndex_,rhs.readerIndex_);
         std::swap(writerIndex_,rhs.writerIndex_);
     }
 
-    ssize_t Buffer::readFd(int fd, int *savedErrno) {
+    ssize_t Buffer::readFd(int fd, int* savedErrno) {
+        // saved an ioctl()/FIONREAD call to tell how much to read
         char extrabuf[65536];
         struct iovec vec[2];
         const size_t writable = writableBytes();
@@ -44,10 +45,16 @@ namespace kvDB {
 
         const ssize_t n = readv(fd,vec,2);
         if(n < 0){
+            //读报错就记录
             *savedErrno = errno;
         }else if(size_t(n) <= writable){
+            //读到的数据小于可写数据空间时，
+            //说明数据直接读去到Buffer中
             writerIndex_ += n;
         }else{
+            //当读去的数据超过Buffer可写空间时，
+            //就用到了栈空间，这时要将栈中的数据
+            //存入到Buffer中。
             writerIndex_ = buffer_.size();
             append(extrabuf,n - writable);
         }

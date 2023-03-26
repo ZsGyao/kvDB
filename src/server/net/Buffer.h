@@ -38,7 +38,8 @@ namespace kvDB {
         /* 交换两个应用层buff */
         void swap(Buffer& rhs);
 
-        ssize_t readFd(int fd, int *savedErrno);
+        /* 从内核协议栈的缓存区读取到应用层buffer */
+        ssize_t readFd(int fd, int* savedErrno);
 
         /* buffer中可读的字节数 */
         size_t readableBytes() const { return writerIndex_ - readerIndex_; }

@@ -42,9 +42,20 @@ namespace kvDB {
 
         void shutdownWrite() const;
 
+        /* 禁用 Nagle’s Algorithm，
+         * Nagle算法。它规定：如果包的大小满足MSS，那么可以立即发送，否则数据会被放到缓冲区，
+         * 等到已经发送的包被确认了之后才能继续发送。 */
         void setTcpNoDelay(bool on) const;
+
+        /* 设置地址重用SO_REUSEADDR
+         * SO_REUSEADDR用于对TCP套接字处于TIME_WAIT状态下的socket，才可以重复绑定使用 */
         void setReuseAddr(bool on);
+
+        /* 设置端口重用SO_REUSEPORT  SO_REUSEPORT允许多个线程/进程，绑定在同一个端口上
+         * 多个socket可以同时bind同一个tcp/udp端口（ip+port组合）。同时内核保证多个这样的socket的负载均衡 */
         void setReusePort(bool on);
+
+        /* 设置Tcp层的心跳包 */
         void setKeepAlive(bool on);
 
     private:

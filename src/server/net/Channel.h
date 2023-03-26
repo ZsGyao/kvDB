@@ -47,22 +47,23 @@ namespace kvDB {
         bool isNoneEvent() const { return events_ == kNoneEvent; }
 
         /* 为了防止TcpConnection在运行时，链接被释放掉，用一个弱引用指向它，
-         * 一旦使用时， .lock 变成shared_ptr，就不会在使用时释放 */
+         * 一旦使用时， .lock 变成shared_ptr，就不会在使用时释放
+         * 需要传入一个TcpConnection实例*/
         void tie(const std::shared_ptr<void> &);
 
-        /* 添加读事件 */
+        /* fd添加关心读事件 */
         void enableReading();
 
-        /* 添加写事件 */
+        /* fd添加关心写事件 */
         void enableWriting();
 
-        /* 取消写事件 */
+        /* fd取消关心写事件 */
         void disableWriting();
 
-        /* 取消所有事件 */
+        /* fd取消关心所有事件 */
         void disableAll();
 
-        /* 是否监听了写事件 */
+        /* fd是否关心了写事件 */
         bool isWriting() const { return events_ & kWriteEvent; }
 
         // for Poller

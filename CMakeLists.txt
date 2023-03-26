@@ -31,7 +31,7 @@ set(LIB_SRC
         src/server/net/Buffer.cpp
         src/server/net/InetAddress.cpp
         src/server/net/Socket.cpp
-        src/server/net/EventLoop.cpp src/server/net/EventLoop.h src/server/net/Channel.cpp src/server/net/Channel.h src/server/net/EpollPoller.cpp src/server/net/EpollPoller.h)
+        src/server/net/EventLoop.cpp src/server/net/EventLoop.h src/server/net/Channel.cpp src/server/net/Channel.h src/server/net/EpollPoller.cpp src/server/net/EpollPoller.h src/server/net/Acceptor.cpp src/server/net/Acceptor.h src/server/net/TcpConnection.cpp src/server/net/TcpConnection.h src/server/net/Callbacks.h src/server/comm/Log.cpp src/server/comm/Log.h)
 
 set(LIBS
         src
