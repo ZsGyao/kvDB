@@ -18,6 +18,7 @@
 #include <vector>
 #include <queue>
 #include <semaphore.h>
+#include <mutex>
 
 namespace kvDB {
 
@@ -90,7 +91,6 @@ namespace kvDB {
         LogLevel          m_level;       // 日志等级
         pid_t             m_pid = 0;     // 进程 id
         pid_t             m_tid = 0;     // 线程 id
-        uint64_t          m_cor_id = 0;  // 协程 id
         const char*       m_file_name;   // 文件名
         int               m_line = 0;    // 行号
         const char*       m_func_name;   // 执行的函数名
@@ -109,10 +109,115 @@ namespace kvDB {
         LogEvent::ptr m_event;
     };
 
+    /**
+     * @brief 异步写日志器
+     */
+    class AsyncLogger {
+    public:
+        typedef std::shared_ptr<AsyncLogger> ptr;
 
-    class Log {
+        /**
+         * @brief 构造函数
+         * @param file_name 写入文件名
+         * @param file_path 写入文件路径
+         * @param max_size 最大大小
+         * @param type 日志类型
+         */
+        AsyncLogger(std::string file_name, std::string file_path, int max_size);
 
+        /**
+         * @brief 析构函数
+         */
+        ~AsyncLogger();
+
+        /**
+         * @brief 向任务队列中加入任务
+         * @param buffer 待写入的日志集合
+         */
+        void push(std::vector<std::string>& buffer);
+
+        /**
+         * @brief 将缓冲区的数据刷写到文件
+         */
+        void flush();
+
+        /**
+         * @brief 执行异步写入日志
+         * @param arg 要写入的参数
+         * @attention 当条件m_condition满足被唤醒时，就开始写入硬盘
+         */
+        static void* execute(void* arg);
+
+        /**
+         * @brief 停止异步写日志
+         */
+        void stop();
+
+    public:
+        // 日志写入的任务队列，vector保存要写入的日志
+        std::queue<std::vector<std::string>> m_tasks;
+
+    private:
+        std::string    m_file_name;                // 写入文件名
+        std::string    m_file_path;                // 日志写入路径
+        int            m_max_size = 0;             // 写入单个文件最大大小
+        int            m_no = 0;                   // 写入文件的下标
+        bool           m_need_reopen = false;      // 是否需要重新打开文件
+        FILE*          m_file_handle = nullptr;    // 文件句柄
+        std::string    m_date;                     // 日期
+
+        std::mutex     m_mutex;                    // 互斥量
+        pthread_cond_t m_condition;                // 线程初始化条件
+        bool           m_stop = false;             // 异步写入是否停止
+
+    public:
+        pthread_t m_thread;
+        sem_t     m_semaphore;
     };
+
+    class Logger {
+    public:
+        typedef std::shared_ptr<Logger> ptr;
+
+        Logger();
+
+        ~Logger();
+
+        void init(const std::string& file_name, const std::string& file_path, int max_size, int sync_interval);
+
+        // void log();
+        void pushLog(const std::string& log_msg);
+
+        /**
+         * @brief 取出保存在日志器中的任务，以定时任务的形式，加入异步日志器，去写入
+         */
+        void loopFunc();
+
+        /**
+         * @brief 停止并强制写入所有的日志
+         */
+        void flush();
+
+        /**
+         * @brief 启动日志器
+         */
+        void start();
+
+        AsyncLogger::ptr getAsyncLogger() {
+            return m_async_logger;
+        }
+
+    public:
+        std::vector<std::string> m_log_buffer;     // 保存RPC日志
+
+    private:
+        std::mutex       m_log_buff_mutex;
+        bool             m_is_init = false;    // 是否初始化
+        AsyncLogger::ptr m_async_logger;       // 异步写入日志的AsyncLogger实例指针
+
+        int              m_sync_interval = 0;
+    };
+
 }
 
 #endif //KVDB_LOG_H
