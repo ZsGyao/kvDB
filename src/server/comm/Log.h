@@ -12,15 +12,77 @@
 #ifndef KVDB_LOG_H
 #define KVDB_LOG_H
 
-#include <memory>
+#include <stdio.h>
 #include <string>
-#include <sstream>
-#include <vector>
-#include <queue>
-#include <semaphore.h>
-#include <mutex>
+#include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <time.h>
+#include <sys/time.h>
+#include <sys/types.h> // getpid, gettid
 
 namespace kvDB {
+
+    void* be_thdo(void* args);
+
+#define LOG_MEM_SET(mem_lmt)                                                   \
+    do {                                                                       \
+        if (mem_lmt < 90 * 1024 * 1024) {                                      \
+            mem_lmt = 90 * 1024 * 1024;                                        \
+        } else if (mem_lmt > 1024 * 1024 * 1024) {                             \
+            mem_lmt = 1024 * 1024 * 1024;                                      \
+        }                                                                      \
+        kvDB::ring_log::_one_buff_len = mem_lmt;                               \
+    } while (0)
+
+#define LOG_INIT(log_dir, prog_name, level)                                    \
+    do {                                                                       \
+        kvDB::ring_log::ins()->init_path(log_dir, prog_name, level);           \
+        pthread_t tid;                                                         \
+        pthread_create(&tid, NULL, kvDB::be_thdo, NULL);                       \
+        pthread_detach(tid);                                                   \
+    } while (0)
+
+//format: [LEVEL][yy-mm-dd h:m:s.ms][tid]file_name:line_no(func_name):content
+#define LOG_INFO(fmt, args...)                                                       \
+    do {                                                                             \
+        if (kvDB::ring_log::ins()->get_level() >= kvDB::LogLevel::INFO) {            \
+            kvDB::ring_log::ins()->try_append("[TRACE]", "[%u]%s:%d(%s): " fmt "\n", \
+                    gettid(), __FILE__, __LINE__, __FUNCTION__, ##args);             \
+        }                                                                            \
+    } while (0)
+
+#define LOG_DEBUG(fmt, args...)                                                      \
+    do {                                                                             \
+        if (kvDB::ring_log::ins()->get_level() >= kvDB::LogLevel::DEBUG) {           \
+            kvDB::ring_log::ins()->try_append("[DEBUG]", "[%u]%s:%d(%s): " fmt "\n", \
+                    gettid(), __FILE__, __LINE__, __FUNCTION__, ##args);             \
+        }                                                                            \
+    } while (0)
+
+#define LOG_WARN(fmt, args...)                                                       \
+    do {                                                                             \
+        if (kvDB::ring_log::ins()->get_level() >= kvDB::LogLevel::WARN) {                                                               \
+            kvDB::ring_log::ins()->try_append("[WARN]", "[%u]%s:%d(%s): " fmt "\n",  \
+                    gettid(), __FILE__, __LINE__, __FUNCTION__, ##args);             \
+        }                                                                            \
+    } while (0)
+
+#define LOG_ERROR(fmt, args...)                                                      \
+    do {                                                                             \
+        if (kvDB::ring_log::ins()->get_level() >= kvDB::LogLevel::ERROR) {           \
+            kvDB::ring_log::ins()->try_append("[ERROR]", "[%u]%s:%d(%s): " fmt "\n", \
+                gettid(), __FILE__, __LINE__, __FUNCTION__, ##args);                 \
+        }                                                                            \
+    } while (0)
+
+#define LOG_FATAL(fmt, args...)                                                      \
+    do {                                                                             \
+    kvDB::ring_log::ins()->try_append("[FATAL]", "[%u]%s:%d(%s): " fmt "\n",         \
+            gettid(), __FILE__, __LINE__, __FUNCTION__, ##args);                     \
+    } while (0)
+
 
     /**
     * @brief 日志级别枚举类
@@ -30,7 +92,7 @@ namespace kvDB {
         INFO  = 2,   // 一般 信息
         WARN  = 3,   // 警告 信息
         ERROR = 4,   // 错误 信息
-        FATAL  = 5   // 致命 错误
+        FATAL = 5    // 致命 错误
     };
 
     /**
@@ -38,184 +100,197 @@ namespace kvDB {
      * @param[in] str level 字符串
      * @return 日志等级枚举
      */
-    LogLevel stringToLevel(const std::string& str);
+    LogLevel stringToLevel(const std::string &str);
 
     /**
      * @brief 将 LogLevel 转为 string
      * @param[in] level 日志等级
      * @return string 日志等级
      */
-    std::string levelToString(const LogLevel& level);
+    std::string levelToString(const LogLevel &level);
 
-    /**
-     * @brief 是否打开日志
-     * @return
-     */
-    bool OpenLog();
-
-    /**
-     * @brief 日志事件类
-     */
-    class LogEvent {
-    public:
-        typedef std::shared_ptr<LogEvent> ptr;
-
-        /**
-         * @brief 构造函数
-         * @param level 日志等级
-         * @param file_name 文件名
-         * @param line 行号
-         * @param func_name 执行的函数名
-         * @param type 日志类型
-         */
-        LogEvent(LogLevel level, const char* file_name, int line, const char* func_name);
-
-        /**
-         * @brief 析构函数
-         */
-        ~LogEvent();
-
-        /**
-         * @brief 获取 stream 流
-         * @return stream 流
-         */
-        std::stringstream& getStringStream();
-
-        /**
-         * @brief 在包装类析构时调用写入日志
-         */
-        void log();
-
-    private:
-        timeval           m_timeval;     // 时间结构体，日志发生时间
-        LogLevel          m_level;       // 日志等级
-        pid_t             m_pid = 0;     // 进程 id
-        pid_t             m_tid = 0;     // 线程 id
-        const char*       m_file_name;   // 文件名
-        int               m_line = 0;    // 行号
-        const char*       m_func_name;   // 执行的函数名
-        std::stringstream m_ss;          // stream 流
-    };
-
-    /**
-     * @brief 日志包装类，在析构时写入日志
-     */
-    class LogWarp {
-    public:
-        explicit LogWarp(LogEvent::ptr event);
-        ~LogWarp();
-        std::stringstream& getStringStream();
-    private:
-        LogEvent::ptr m_event;
-    };
-
-    /**
-     * @brief 异步写日志器
-     */
-    class AsyncLogger {
-    public:
-        typedef std::shared_ptr<AsyncLogger> ptr;
-
-        /**
-         * @brief 构造函数
-         * @param file_name 写入文件名
-         * @param file_path 写入文件路径
-         * @param max_size 最大大小
-         * @param type 日志类型
-         */
-        AsyncLogger(std::string file_name, std::string file_path, int max_size);
-
-        /**
-         * @brief 析构函数
-         */
-        ~AsyncLogger();
-
-        /**
-         * @brief 向任务队列中加入任务
-         * @param buffer 待写入的日志集合
-         */
-        void push(std::vector<std::string>& buffer);
-
-        /**
-         * @brief 将缓冲区的数据刷写到文件
-         */
-        void flush();
-
-        /**
-         * @brief 执行异步写入日志
-         * @param arg 要写入的参数
-         * @attention 当条件m_condition满足被唤醒时，就开始写入硬盘
-         */
-        static void* execute(void* arg);
-
-        /**
-         * @brief 停止异步写日志
-         */
-        void stop();
-
-    public:
-        // 日志写入的任务队列，vector保存要写入的日志
-        std::queue<std::vector<std::string>> m_tasks;
-
-    private:
-        std::string    m_file_name;                // 写入文件名
-        std::string    m_file_path;                // 日志写入路径
-        int            m_max_size = 0;             // 写入单个文件最大大小
-        int            m_no = 0;                   // 写入文件的下标
-        bool           m_need_reopen = false;      // 是否需要重新打开文件
-        FILE*          m_file_handle = nullptr;    // 文件句柄
-        std::string    m_date;                     // 日期
-
-        std::mutex     m_mutex;                    // 互斥量
-        pthread_cond_t m_condition;                // 线程初始化条件
-        bool           m_stop = false;             // 异步写入是否停止
-
-    public:
-        pthread_t m_thread;
-        sem_t     m_semaphore;
-    };
-
-    class Logger {
-    public:
-        typedef std::shared_ptr<Logger> ptr;
-
-        Logger();
-
-        ~Logger();
-
-        void init(const std::string& file_name, const std::string& file_path, int max_size, int sync_interval);
-
-        // void log();
-        void pushLog(const std::string& log_msg);
-
-        /**
-         * @brief 取出保存在日志器中的任务，以定时任务的形式，加入异步日志器，去写入
-         */
-        void loopFunc();
-
-        /**
-         * @brief 停止并强制写入所有的日志
-         */
-        void flush();
-
-        /**
-         * @brief 启动日志器
-         */
-        void start();
-
-        AsyncLogger::ptr getAsyncLogger() {
-            return m_async_logger;
+    struct utc_timer {
+        utc_timer() {
+            struct timeval tv;
+            gettimeofday(&tv, nullptr);
+            //set _sys_acc_sec, _sys_acc_min
+            _sys_acc_sec = tv.tv_sec;
+            _sys_acc_min = _sys_acc_sec / 60;
+            //use _sys_acc_sec calc year, mon, day, hour, min, sec
+            struct tm cur_tm;
+            localtime_r((time_t *) &_sys_acc_sec, &cur_tm);
+            year = cur_tm.tm_year + 1900;
+            mon = cur_tm.tm_mon + 1;
+            day = cur_tm.tm_mday;
+            hour = cur_tm.tm_hour;
+            min = cur_tm.tm_min;
+            sec = cur_tm.tm_sec;
+            reset_utc_fmt();
         }
 
-    public:
-        std::vector<std::string> m_log_buffer;     // 保存RPC日志
+        uint64_t get_curr_time(int *p_msec = nullptr) {
+            struct timeval tv;
+            //get current ts
+            gettimeofday(&tv, nullptr);
+            if (p_msec)
+                *p_msec = tv.tv_usec / 1000;
+            //if not in same seconds
+            if ((uint32_t) tv.tv_sec != _sys_acc_sec) {
+                sec = tv.tv_sec % 60;
+                _sys_acc_sec = tv.tv_sec;
+                //or if not in same minutes
+                if (_sys_acc_sec / 60 != _sys_acc_min) {
+                    //use _sys_acc_sec update year, mon, day, hour, min, sec
+                    _sys_acc_min = _sys_acc_sec / 60;
+                    struct tm cur_tm;
+                    localtime_r((time_t *) &_sys_acc_sec, &cur_tm);
+                    year = cur_tm.tm_year + 1900;
+                    mon = cur_tm.tm_mon + 1;
+                    day = cur_tm.tm_mday;
+                    hour = cur_tm.tm_hour;
+                    min = cur_tm.tm_min;
+                    //reformat utc format
+                    reset_utc_fmt();
+                } else {
+                    //reformat utc format only sec
+                    reset_utc_fmt_sec();
+                }
+            }
+            return tv.tv_sec;
+        }
+
+        int year, mon, day, hour, min, sec;
+        char utc_fmt[20];
 
     private:
-        std::mutex       m_log_buff_mutex;
-        bool             m_is_init = false;    // 是否初始化
-        AsyncLogger::ptr m_async_logger;       // 异步写入日志的AsyncLogger实例指针
+        void reset_utc_fmt() {
+            snprintf(utc_fmt, 20, "%d-%02d-%02d %02d:%02d:%02d", year, mon, day, hour, min, sec);
+        }
 
-        int              m_sync_interval = 0;
+        void reset_utc_fmt_sec() {
+            snprintf(utc_fmt + 17, 3, "%02d", sec);
+        }
+
+        uint64_t _sys_acc_min;
+        uint64_t _sys_acc_sec;
+    };
+
+    class cell_buffer {
+    public:
+        enum buffer_status {
+            FREE,
+            FULL
+        };
+
+        cell_buffer(uint32_t len) :
+                status(FREE),
+                prev(NULL),
+                next(NULL),
+                _total_len(len),
+                _used_len(0) {
+            _data = new char[len];
+            if (!_data) {
+                fprintf(stderr, "no space to allocate _data\n");
+                exit(1);
+            }
+        }
+
+        uint32_t avail_len() const { return _total_len - _used_len; }
+
+        bool empty() const { return _used_len == 0; }
+
+        void append(const char *log_line, uint32_t len) {
+            if (avail_len() < len)
+                return;
+            memcpy(_data + _used_len, log_line, len);
+            _used_len += len;
+        }
+
+        void clear() {
+            _used_len = 0;
+            status = FREE;
+        }
+
+        void persist(FILE *fp) {
+            uint32_t wt_len = fwrite(_data, 1, _used_len, fp);
+            if (wt_len != _used_len) {
+                fprintf(stderr, "write log to disk error, wt_len %u\n", wt_len);
+            }
+        }
+
+        buffer_status status;
+
+        cell_buffer *prev;
+        cell_buffer *next;
+
+    private:
+        cell_buffer(const cell_buffer &);
+
+        cell_buffer &operator=(const cell_buffer &);
+
+        uint32_t _total_len;
+        uint32_t _used_len;
+        char *_data;
+    };
+
+    class ring_log
+    {
+    public:
+        //for thread-safe singleton
+        static ring_log* ins()
+        {
+            pthread_once(&_once, ring_log::init);
+            return _ins;
+        }
+
+        static void init()
+        {
+            while (!_ins) _ins = new ring_log();
+        }
+
+        void init_path(const char* log_dir, const char* prog_name, int level);
+
+        int get_level() const { return _level; }
+
+        void persist();
+
+        void try_append(const char* lvl, const char* format, ...);
+
+    private:
+        ring_log();
+
+        bool decis_file(int year, int mon, int day);
+
+        ring_log(const ring_log&);
+        const ring_log& operator=(const ring_log&);
+
+        int _buff_cnt;
+
+        cell_buffer* _curr_buf;
+        cell_buffer* _prst_buf;
+
+        cell_buffer* last_buf;
+
+        FILE* _fp;
+        pid_t _pid;
+        int _year, _mon, _day, _log_cnt;
+        char _prog_name[128];
+        char _log_dir[512];
+
+        bool _env_ok;//if log dir ok
+        int _level;
+        uint64_t _lst_lts;//last can't log error time(s) if value != 0, log error happened last time
+
+        utc_timer _tm;
+
+        static pthread_mutex_t _mutex;
+        static pthread_cond_t _cond;
+
+        static uint32_t _one_buff_len;
+
+        //singleton
+        static ring_log* _ins;
+        static pthread_once_t _once;
     };
 
 }

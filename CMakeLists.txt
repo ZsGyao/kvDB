@@ -28,14 +28,34 @@ option(BUILD_TEST "ON for complile test" ON)
 set(LIB_SRC
         src/server/comm/Logger.cpp
         src/server/comm/Timestamp.cpp
+        src/server/comm/Log.cpp
         src/server/net/Buffer.cpp
         src/server/net/InetAddress.cpp
         src/server/net/Socket.cpp
-        src/server/net/EventLoop.cpp src/server/net/EventLoop.h src/server/net/Channel.cpp src/server/net/Channel.h src/server/net/EpollPoller.cpp src/server/net/EpollPoller.h src/server/net/Acceptor.cpp src/server/net/Acceptor.h src/server/net/TcpConnection.cpp src/server/net/TcpConnection.h src/server/net/Callbacks.h src/server/comm/Log.cpp src/server/comm/Log.h src/server/net/Server.cpp src/server/net/Server.h)
+        src/server/net/EventLoop.cpp
+        src/server/net/Channel.cpp
+        src/server/net/EpollPoller.cpp
+        src/server/net/Acceptor.cpp
+        src/server/net/Server.cpp
+        src/server/net/TcpConnection.cpp
+        src/server/db/SkipList.cpp
+        src/server/db/DataBase.cpp
+        src/client/DBClient.cpp
+        src/server/DBServer.cpp src/server/DBServer.h)
 
 set(LIBS
         src
         )
+
+add_executable(test_log tests/test_log.cpp)
+add_dependencies(test_log src)
+force_redefine_file_macro_for_sources(test_log)  #__FILE__
+target_link_libraries(test_log ${LIBS})
+
+add_executable(DB_Client src/client/DBClient_Start.cpp)
+add_dependencies(DB_Client src)
+force_redefine_file_macro_for_sources(DB_Client)  #__FILE__
+target_link_libraries(DB_Client ${LIBS})
 
 add_library(src SHARED ${LIB_SRC})
 force_redefine_file_macro_for_sources(src)

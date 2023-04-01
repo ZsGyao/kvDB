@@ -10,45 +10,27 @@
 
 
 #include "Log.h"
-#include <atomic>
-#include <unistd.h>
-#include <stdio.h>
-#include <ctime>
-#include <sys/syscall.h>
-#include <sys/time.h>
-#include <assert.h>
-#include <signal.h>
-#include <iostream>
-#include <algorithm>
+#include <errno.h>
+#include <unistd.h>      // access, getpid
+#include <assert.h>      // assert
+#include <stdarg.h>      // va_list
+#include <sys/stat.h>    // mkdir
+#include <sys/syscall.h> // system call
 
 namespace kvDB {
-    /// LOG日志写入的index
-    static std::atomic<int64_t> g_log_index{0};
 
-    extern kvDB::Logger::ptr gLogger;
-
-    void CoredumpHandler(int signal_no) {
-        // ErrorLog << "progress received invalid signal, will exit";
-        printf("progress received invalid signal, will exit\n");
-        gLogger->flush();
-        pthread_join(gLogger->getAsyncLogger()->m_thread, nullptr);
-
-        signal(signal_no, SIG_DFL);
-        raise(signal_no);
-    }
-
-    static thread_local pid_t t_thread_id = 0;   // 线程号
-    static pid_t g_pid = 0;                      // 进程号
+#define MEM_USE_LIMIT (3u * 1024 * 1024 * 1024)//3GB
+#define LOG_USE_LIMIT (1u * 1024 * 1024 * 1024)//1GB
+#define LOG_LEN_LIMIT (4 * 1024)//4K
+#define RELOG_THRESOLD 5
+#define BUFF_WAIT_TIME 1
 
     /* 获取线程id */
     pid_t gettid() {
-        if (t_thread_id == 0) {
-            t_thread_id = syscall(SYS_gettid);
-        }
-        return t_thread_id;
+        return syscall(__NR_gettid);
     }
 
-    LogLevel stringToLevel(const std::string& str) {
+    LogLevel stringToLevel(const std::string &str) {
         if (str == "DEBUG")
             return LogLevel::DEBUG;
 
@@ -90,263 +72,230 @@ namespace kvDB {
         }
     }
 
-    bool OpenLog() {
-        if (!gLogger) {
-            return false;
+    pthread_mutex_t ring_log::_mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t ring_log::_cond = PTHREAD_COND_INITIALIZER;
+
+    ring_log *ring_log::_ins = NULL;
+    pthread_once_t ring_log::_once = PTHREAD_ONCE_INIT;
+    uint32_t ring_log::_one_buff_len = 30 * 1024 * 1024;//30MB
+
+    ring_log::ring_log() :
+            _buff_cnt(3),
+            _curr_buf(NULL),
+            _prst_buf(NULL),
+            _fp(NULL),
+            _log_cnt(0),
+            _env_ok(false),
+            _level(INFO),
+            _lst_lts(0),
+            _tm() {
+        //create double linked list
+        cell_buffer *head = new cell_buffer(_one_buff_len);
+        if (!head) {
+            fprintf(stderr, "no space to allocate cell_buffer\n");
+            exit(1);
         }
-        return true;
-    }
-
-    LogEvent::LogEvent(LogLevel level, const char *file_name, int line, const char *func_name)
-            : m_level(level),
-              m_file_name(file_name),
-              m_line(line),
-              m_func_name(func_name) {
-    }
-
-    LogEvent::~LogEvent() {
-    }
-
-    std::stringstream& LogEvent::getStringStream() {
-        gettimeofday(&m_timeval, nullptr);
-        struct tm time;  // ISO C `broken-down time' structure.
-        /* Return the `struct tm' representation of *TIMER in local time,
-          using *TP to store the result.  */
-        localtime_r(&(m_timeval.tv_sec), &time);
-        const char *format = "%Y-%m-%d %H:%M:%S";
-        char buf[128];
-        strftime(buf, sizeof(buf), format, &time);
-        m_ss << "[" << buf << "]\t";
-
-        std::string s_level = kvDB::levelToString(m_level);
-        m_ss << "[" << s_level << "]\t";
-
-        if (g_pid == 0) {
-            g_pid = getpid();
+        cell_buffer *current;
+        cell_buffer *prev = head;
+        for (int i = 1; i < _buff_cnt; ++i) {
+            current = new cell_buffer(_one_buff_len);
+            if (!current) {
+                fprintf(stderr, "no space to allocate cell_buffer\n");
+                exit(1);
+            }
+            current->prev = prev;
+            prev->next = current;
+            prev = current;
         }
-        m_pid = g_pid;
+        prev->next = head;
+        head->prev = prev;
 
-        if (t_thread_id == 0) {
-            t_thread_id = gettid();
+        _curr_buf = head;
+        _prst_buf = head;
+
+        _pid = getpid();
+    }
+
+    void ring_log::init_path(const char *log_dir, const char *prog_name, int level) {
+        pthread_mutex_lock(&_mutex);
+
+        strncpy(_log_dir, log_dir, 512);
+        //name format:  name_year-mon-day-t[tid].log.n
+        strncpy(_prog_name, prog_name, 128);
+
+        mkdir(_log_dir, 0777);
+        //查看是否存在此目录、目录下是否允许创建文件
+        if (access(_log_dir, F_OK | W_OK) == -1) {
+            fprintf(stderr, "logdir: %s error: %s\n", _log_dir, strerror(errno));
+        } else {
+            _env_ok = true;
         }
-        m_tid = t_thread_id;
+        if (level > FATAL)
+            level = FATAL;
+        if (level < DEBUG)
+            level = DEBUG;
+        _level = level;
 
-        m_ss << "[" << m_pid << "]\t"
-             << "[" << m_tid << "]\t"
-             << "[" << m_file_name << ":" << m_line << "]\t";
-
-        return m_ss;
+        pthread_mutex_unlock(&_mutex);
     }
 
-    /**
-     * 比如写入一个 DebugLog << "Hello zRPC Log";
-     * 1. 调用宏，LogWarp包装一个 log_event，在运行完这一行，到下一行时，LogWarp析构，调用 log_event->log()
-     * 2. 根据 log_event 类型将 流保存到不同的容器中
-     */
-    void LogEvent::log() {
-        m_ss << "\n";
-        if (m_level >= kvDB::gConfig->m_log_level) {
-            gLogger->pushLog(m_ss.str());                           // 把写入的
-        }
-    }
-
-    LogWarp::LogWarp(LogEvent::ptr event) : m_event(std::move(event)) {
-    }
-
-    LogWarp::~LogWarp() {
-        m_event->log();
-    }
-
-    std::stringstream &LogWarp::getStringStream() {
-        return m_event->getStringStream();
-    }
-
-    AsyncLogger::AsyncLogger(std::string file_name, std::string file_path, int max_size)
-            : m_file_name(file_name),
-              m_file_path(file_path),
-              m_max_size(max_size) {
-
-        int rt = sem_init(&m_semaphore, 0, 0);
-        assert(rt == 0);
-
-        //  获取当前时间并格式化
-        timeval now;
-        gettimeofday(&now, nullptr);
-        struct tm now_time;
-        localtime_r(&(now.tv_sec), &now_time);
-
-        const char *format = "%Y-%m-%d";    // 2023-03-27
-        char date[32];
-        strftime(date, sizeof(date), format, &now_time);
-        m_date = std::string(date);
-
-        /* Create a new thread, starting with execution of START-ROUTINE
-           getting passed ARG.  Creation attributed come from ATTR.  The new
-           handle is stored in *NEWTHREAD.  */
-        rt = pthread_create(&m_thread, nullptr, &AsyncLogger::execute, this);
-        assert(rt == 0);
-        rt = sem_wait(&m_semaphore);
-        assert(rt == 0);
-    }
-
-    AsyncLogger::~AsyncLogger() {
-    }
-
-    void AsyncLogger::push(std::vector<std::string>& buffer) {
-        if (!buffer.empty()) {
-            MutexType::Lock lock(m_mutex);
-            m_tasks.push(buffer);
-            lock.unlock();
-            // 唤醒信号
-            pthread_cond_signal(&m_condition);
-        }
-    }
-
-    void AsyncLogger::flush() {
-        if (m_file_handle) {
-            fflush(m_file_handle);
-        }
-    }
-
-    /* 当条件m_condition满足被唤醒时，就开始写入硬盘 */
-    void* AsyncLogger::execute(void *arg) {
-
-//        std::cout << "**** Debug [log.cpp " << __LINE__ << "], AsyncLogger::execute [threadId:" << gettid() << "] *****"
-//                  << std::endl;
-
-        // 获取当前AsyncLogger实例
-        AsyncLogger *ptr = reinterpret_cast<AsyncLogger *>(arg);
-        // std::cout << "Debug [log.cpp "<< __LINE__ <<"], get AsyncLogger* ptr [threadId:" << gettid() << "]" << std::endl;
-        /* Initialize condition variable COND using attributes ATTR, or use
-           the default values if later is NULL.  */
-        int rt = pthread_cond_init(&ptr->m_condition, nullptr);
-        assert(rt == 0);
-
-        // 信号量加一
-        rt = sem_post(&ptr->m_semaphore);
-        assert(rt == 0);
-        // std::cout << "Debug [log.cpp "<< __LINE__ <<"], before into execute loop [threadId:" << gettid() << "]" << std::endl;
+    void ring_log::persist() {
         while (true) {
-            MutexType::Lock lock(ptr->m_mutex);
-
-            while (ptr->m_tasks.empty() && !ptr->m_stop) { // 如果任务队列为空 并且写入未停止，线程条件等待
-//                std::cout << "Debug [log.cpp " << __LINE__ << "] into execute loop, pthread_cond_wait [threadId:"
-//                          << gettid() << "]" << std::endl;
-                pthread_cond_wait(&(ptr->m_condition), ptr->m_mutex.getMutex());
+            //check if _prst_buf need to be persist
+            pthread_mutex_lock(&_mutex);
+            if (_prst_buf->status == cell_buffer::FREE) {
+                struct timespec tsp;
+                struct timeval now;
+                gettimeofday(&now, NULL);
+                tsp.tv_sec = now.tv_sec;
+                tsp.tv_nsec = now.tv_usec * 1000;//nanoseconds
+                tsp.tv_sec += BUFF_WAIT_TIME;//wait for 1 seconds
+                pthread_cond_timedwait(&_cond, &_mutex, &tsp);
+            }
+            if (_prst_buf->empty()) {
+                //give up, go to next turn
+                pthread_mutex_unlock(&_mutex);
+                continue;
             }
 
-//            std::cout << "Debug [log.cpp " << __LINE__
-//                      << "] into execute loop, pthread_cond_signal, try to get task [threadId:" << gettid() << "]"
-//                      << std::endl;
-
-            // 取出任务队列中的第一个任务
-            std::vector<std::string> tmp;
-            tmp.swap(ptr->m_tasks.front());
-            ptr->m_tasks.pop();
-            bool is_stop = ptr->m_stop;
-            lock.unlock();
-
-//            std::cout << "Debug [log.cpp " << __LINE__
-//                      << "] in execute loop, already put into std::vector<std::string> tmp [tmp.size:"
-//                      << tmp.size() << "] [threadId:" << gettid() << "]" << std::endl;
-
-            // 获取当前时间并格式化
-            timeval now;
-            gettimeofday(&now, nullptr);
-            struct tm now_time;
-            localtime_r(&(now.tv_sec), &now_time);
-
-            const char* format = "%Y-%m-%d";    // 2023-03-10
-            char date[32];
-            strftime(date, sizeof(date), format, &now_time);
-
-            if (ptr->m_date != std::string(date)) { // 说明过了一天，重置文件名
-                // cross day
-                // reset m_no m_date
-                ptr->m_no = 0;
-                ptr->m_date = std::string(date);
-                ptr->m_need_reopen = true;
+            if (_prst_buf->status == cell_buffer::FREE) {
+                assert(_curr_buf == _prst_buf);//to test
+                _curr_buf->status = cell_buffer::FULL;
+                _curr_buf = _curr_buf->next;
             }
 
-            if (!ptr->m_file_handle) { // 如果文件句柄不存在
-                ptr->m_need_reopen = true;
-            }
+            int year = _tm.year, mon = _tm.mon, day = _tm.day;
+            pthread_mutex_unlock(&_mutex);
 
-            std::stringstream ss;
-            ss << ptr->m_file_path << "/" << ptr->m_file_name << "_" << ptr->m_date << "_"
-               << LogTypeToString(ptr->m_log_type) << "_" << ptr->m_no << ".log";
-            std::string full_file_name = ss.str();  // 从流中生成日志文件名
+            //decision which file to write
+            if (!decis_file(year, mon, day))
+                continue;
+            //write
+            _prst_buf->persist(_fp);
+            fflush(_fp);
 
-//            std::cout << "Debug [log.cpp " << __LINE__ << "] in execute loop, full_file_name create [" << full_file_name
-//                      << "]" << std::endl;
-//
-//            std::cout << "Debug [log.cpp " << __LINE__ << "] m_need_reopen:" << ptr->m_need_reopen
-//                      << " LogType:"<< ptr->m_log_type << " threadId:" << gettid() << std::endl;
+            pthread_mutex_lock(&_mutex);
+            _prst_buf->clear();
+            _prst_buf = _prst_buf->next;
+            pthread_mutex_unlock(&_mutex);
+        }
+    }
 
-            if (ptr->m_need_reopen) { // 如果需要重新打开
-                if (ptr->m_file_handle) { // 如果打开过，文件句柄存在
-                    fclose(ptr->m_file_handle); // 关闭
+    void ring_log::try_append(const char *lvl, const char *format, ...) {
+        int ms;
+        uint64_t curr_sec = _tm.get_curr_time(&ms);
+        if (_lst_lts && curr_sec - _lst_lts < RELOG_THRESOLD)
+            return;
+
+        char log_line[LOG_LEN_LIMIT];
+        //int prev_len = snprintf(log_line, LOG_LEN_LIMIT, "%s[%d-%02d-%02d %02d:%02d:%02d.%03d]", lvl, _tm.year, _tm.mon, _tm.day, _tm.hour, _tm.min, _tm.sec, ms);
+        int prev_len = snprintf(log_line, LOG_LEN_LIMIT, "%s[%s.%03d]", lvl, _tm.utc_fmt, ms);
+
+        va_list arg_ptr;
+        va_start(arg_ptr, format);
+
+        //TO OPTIMIZE IN THE FUTURE: performance too low here!
+        int main_len = vsnprintf(log_line + prev_len, LOG_LEN_LIMIT - prev_len, format, arg_ptr);
+
+        va_end(arg_ptr);
+
+        uint32_t len = prev_len + main_len;
+
+        _lst_lts = 0;
+        bool tell_back = false;
+
+        pthread_mutex_lock(&_mutex);
+        if (_curr_buf->status == cell_buffer::FREE && _curr_buf->avail_len() >= len) {
+            _curr_buf->append(log_line, len);
+        } else {
+            //1. _curr_buf->status = cell_buffer::FREE but _curr_buf->avail_len() < len
+            //2. _curr_buf->status = cell_buffer::FULL
+            if (_curr_buf->status == cell_buffer::FREE) {
+                _curr_buf->status = cell_buffer::FULL;//set to FULL
+                cell_buffer *next_buf = _curr_buf->next;
+                //tell backend thread
+                tell_back = true;
+
+                //it suggest that this buffer is under the persist job
+                if (next_buf->status == cell_buffer::FULL) {
+                    //if mem use < MEM_USE_LIMIT, allocate new cell_buffer
+                    if (_one_buff_len * (_buff_cnt + 1) > MEM_USE_LIMIT) {
+                        fprintf(stderr, "no more log space can use\n");
+                        _curr_buf = next_buf;
+                        _lst_lts = curr_sec;
+                    } else {
+                        cell_buffer *new_buffer = new cell_buffer(_one_buff_len);
+                        _buff_cnt += 1;
+                        new_buffer->prev = _curr_buf;
+                        _curr_buf->next = new_buffer;
+                        new_buffer->next = next_buf;
+                        next_buf->prev = new_buffer;
+                        _curr_buf = new_buffer;
+                    }
+                } else {
+                    //next buffer is free, we can use it
+                    _curr_buf = next_buf;
                 }
-                /* 以附加的方式打开只写文件。若文件不存在，则会创建该文件；
-                   如果文件存在，则写入的数据会被加到文件尾后，即文件原先的内容会被保留（EOF 符保留）。 */
-                ptr->m_file_handle = fopen(full_file_name.c_str(), "a"); // 打开文件
-                if(!ptr->m_file_handle) {
-                    std::cout << "fopen error! " << strerror(errno) << std::endl;
-                    Exit(0);
-                }
-                ptr->m_need_reopen = false;
-            }
-            //  ftell 用于得到文件位置指针当前位置相对于文件首的偏移字节数
-//            std::cout<< "------ ptr->m_file_handle size: XXXXXXX" << " --------" << std::endl;
-            // ToDo ptr指针的m_file_handle为空，改
-            auto size = ftell(ptr->m_file_handle);
-            if(size < 0){
-                std::cout << "ftell() error" << std::endl;
-            }
-//            std::cout<< "------ ptr->m_file_handle size:" << size << " --------" << std::endl;
-            if ( size > ptr->m_max_size) { // 如果写日志文件超出容量
-                fclose(ptr->m_file_handle);                    // 关闭此文件
-
-                // single log file over max size
-                ptr->m_no++;                                         // 写入日志文件名角标加一
-                std::stringstream ss2;
-                ss2 << ptr->m_file_path << "/" << ptr->m_file_name << "_" << ptr->m_date << "_"
-                    << LogTypeToString(ptr->m_log_type) << "_" << ptr->m_no << ".log";
-                full_file_name = ss2.str();   // 从流中生成日志文件名
-
-//                std::cout << "Debug [log.cpp " << __LINE__ << "] in execute loop, full_file_name(out of day) recreate ["
-//                          << full_file_name << "]" << std::endl;
-
-                ptr->m_file_handle = fopen(full_file_name.c_str(), "a");
-                ptr->m_need_reopen = false;
-            }
-
-            if (!ptr->m_file_handle) {
-                std::cout << "open log file " << full_file_name.c_str() << "error!" << std::endl;
-            }
-
-//            std::cout << "Debug [log.cpp " << __LINE__ << "] in execute loop, try to fwrite [m_file_handle:"
-//                      << ptr->m_file_handle << "]" << std::endl;
-
-            // 开始写入，从vector中取出要写入的日志string
-            for (const auto& i: tmp) {
-                if (!i.empty()) {
-                    fwrite(i.c_str(), 1, i.length(), ptr->m_file_handle);
-//                    std::cout << "Debug [log.cpp " << __LINE__ << "], fwrite {log string:" << i << std::endl;
-                }
-            }
-            tmp.clear();
-            fflush(ptr->m_file_handle);
-            if (is_stop) {
-                break;
+                if (!_lst_lts)
+                    _curr_buf->append(log_line, len);
+            } else//_curr_buf->status == cell_buffer::FULL, assert persist is on here too!
+            {
+                _lst_lts = curr_sec;
             }
         }
-        if (ptr->m_file_handle) {
-            fclose(ptr->m_file_handle);
-            ptr->m_file_handle = nullptr;
+        pthread_mutex_unlock(&_mutex);
+        if (tell_back) {
+            pthread_cond_signal(&_cond);
         }
+    }
 
-        return nullptr;
+    bool ring_log::decis_file(int year, int mon, int day) {
+        //TODO: 是根据日志消息的时间写时间？还是自主写时间？  I select 自主写时间
+        if (!_env_ok) {
+            if (_fp)
+                fclose(_fp);
+            _fp = fopen("/dev/null", "w");
+            return _fp != NULL;
+        }
+        if (!_fp) {
+            _year = year, _mon = mon, _day = day;
+            char log_path[1024] = {};
+            sprintf(log_path, "%s/%s.%d%02d%02d.%u.log", _log_dir, _prog_name, _year, _mon, _day, _pid);
+            _fp = fopen(log_path, "w");
+            if (_fp)
+                _log_cnt += 1;
+        } else if (_day != day) {
+            fclose(_fp);
+            char log_path[1024] = {};
+            _year = year, _mon = mon, _day = day;
+            sprintf(log_path, "%s/%s.%d%02d%02d.%u.log", _log_dir, _prog_name, _year, _mon, _day, _pid);
+            _fp = fopen(log_path, "w");
+            if (_fp)
+                _log_cnt = 1;
+        } else if (ftell(_fp) >= LOG_USE_LIMIT) {
+            fclose(_fp);
+            char old_path[1024] = {};
+            char new_path[1024] = {};
+            //mv xxx.log.[i] xxx.log.[i + 1]
+            for (int i = _log_cnt - 1; i > 0; --i) {
+                sprintf(old_path, "%s/%s.%d%02d%02d.%u.log.%d", _log_dir, _prog_name, _year, _mon, _day, _pid, i);
+                sprintf(new_path, "%s/%s.%d%02d%02d.%u.log.%d", _log_dir, _prog_name, _year, _mon, _day, _pid, i + 1);
+                rename(old_path, new_path);
+            }
+            //mv xxx.log xxx.log.1
+            sprintf(old_path, "%s/%s.%d%02d%02d.%u.log", _log_dir, _prog_name, _year, _mon, _day, _pid);
+            sprintf(new_path, "%s/%s.%d%02d%02d.%u.log.1", _log_dir, _prog_name, _year, _mon, _day, _pid);
+            rename(old_path, new_path);
+            _fp = fopen(old_path, "w");
+            if (_fp)
+                _log_cnt += 1;
+        }
+        return _fp != NULL;
+    }
+
+    void *be_thdo(void *args) {
+        ring_log::ins()->persist();
+        return NULL;
     }
 
 }

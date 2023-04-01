@@ -13,6 +13,7 @@
 #define KVDB_TCPCONNECTION_H
 
 #include <memory>
+#include <string>
 #include "EventLoop.h"
 #include "InetAddress.h"
 #include "Callbacks.h"
