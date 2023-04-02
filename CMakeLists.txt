@@ -41,21 +41,26 @@ set(LIB_SRC
         src/server/db/SkipList.cpp
         src/server/db/DataBase.cpp
         src/client/DBClient.cpp
-        src/server/DBServer.cpp src/server/DBServer.h)
+        src/server/DBServer.cpp src/server/DBServer.h src/server/Server_Start.cpp)
 
 set(LIBS
         src
         )
 
-add_executable(test_log tests/test_log.cpp)
-add_dependencies(test_log src)
-force_redefine_file_macro_for_sources(test_log)  #__FILE__
-target_link_libraries(test_log ${LIBS})
+#add_executable(test_log tests/test_log.cpp)
+#add_dependencies(test_log src)
+#force_redefine_file_macro_for_sources(test_log)  #__FILE__
+#target_link_libraries(test_log ${LIBS})
 
 add_executable(DB_Client src/client/DBClient_Start.cpp)
 add_dependencies(DB_Client src)
 force_redefine_file_macro_for_sources(DB_Client)  #__FILE__
 target_link_libraries(DB_Client ${LIBS})
+
+add_executable(Server_Start src/server/Server_Start.cpp)
+add_dependencies(Server_Start src)
+force_redefine_file_macro_for_sources(Server_Start)  #__FILE__
+target_link_libraries(Server_Start ${LIBS})
 
 add_library(src SHARED ${LIB_SRC})
 force_redefine_file_macro_for_sources(src)
